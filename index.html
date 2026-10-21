@@ -223,6 +223,7 @@
   #reader.v-good .livecard table.pt td, #reader.v-bad .livecard table.pt td { color: #fff; border-color: rgba(255,255,255,.22); }
   #reader.v-good .livestats span, #reader.v-bad .livestats span { background: rgba(255,255,255,.2); }
   #reader.v-good .livewhy, #reader.v-bad .livewhy { color: #fff; }
+  .hwhint { margin: 0; text-align: center; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -306,6 +307,7 @@
         <select id="condition"><option value="used">Used</option><option value="new">New</option></select></div>
       <div style="display:flex;align-items:flex-end"><button class="check" id="checkBtn" type="button">CHECK</button></div>
     </div>
+    <p class="muted hwhint">Bluetooth / USB scanner: just scan. It checks automatically.</p>
   </section>
 
   <p class="err" id="error" hidden></p>
@@ -552,6 +554,7 @@ async function showTab(which) {
 let busy = false;
 async function check() {
   if (busy) return;
+  const viaHw = hwFlag; hwFlag = false;
   showError(""); $("verdict").hidden = true; $("details").hidden = true;
   if (!S.keepaKey) { showError("Add your Keepa API key in Settings first."); $("settingsCard").hidden = false; return; }
   const isbn13 = to13($("isbn").value);
@@ -576,12 +579,19 @@ async function check() {
       hud(a.verdict, p.title, a.profit != null ? money(a.profit) : a.net != null ? money(a.net) : "");
       renderLive(a, condition);
       beep(good(a.verdict));
+    } else if (viaHw) {
+      beep(good(a.verdict));
+      $("verdict").scrollIntoView({ behavior: "smooth", block: "center" });
     }
   } catch (e) {
     showError(e.message);
     if (scanning) { hud("ERR", e.message, ""); $("liveCard").hidden = true; beep(false); }
+    else if (viaHw) beep(false);
   }
-  finally { busy = false; $("checkBtn").textContent = "CHECK"; }
+  finally {
+    busy = false; $("checkBtn").textContent = "CHECK";
+    if (pendingScan) { const n = pendingScan; pendingScan = null; $("isbn").value = n; hwFlag = true; setTimeout(check, 0); }
+  }
 }
 
 // ---------- Barcode scanner ----------
@@ -912,6 +922,57 @@ $("isbn").addEventListener("paste", (e) => {
 $("ocrBtn").addEventListener("click", async () => { if (scanning) await stopScan(); if (liveOn) stopLive(); $("ocrFile").click(); });
 $("ocrFile").addEventListener("change", (e) => { const f = e.target.files && e.target.files[0]; if (f) readIsbnPhoto(f); });
 
+// ---------- Bluetooth / USB barcode scanner (keyboard mode) ----------
+// The scanner "types" the ISBN fast and presses Enter. Catch it anywhere on the page.
+let kbBuf = "", kbLast = 0, kbTimer = null, pendingScan = null, hwFlag = false;
+function ensureAudio() { try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); actx.resume(); } catch {} }
+
+// Cost box focused when a scan came in: split "1.00" + "9780…" back apart
+function splitScan(raw) {
+  const v = String(raw || "").toUpperCase();
+  for (const n of [13, 10]) {
+    if (v.length < n) continue;
+    const tail = v.slice(-n);
+    if (n === 13 ? valid13(tail) : valid10(tail)) return { isbn: to13(tail), rest: v.slice(0, -n) };
+  }
+  return null;
+}
+
+function hwScan(raw) {
+  const isbn = to13(raw);
+  if (!isbn) return false;
+  ensureAudio();
+  if ($("viewScan").hidden) showTab("scan");
+  if (busy) { pendingScan = isbn; return true; }
+  $("isbn").value = isbn;
+  hwFlag = true;
+  check();
+  return true;
+}
+
+document.addEventListener("keydown", (e) => {
+  const tag = e.target && e.target.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;   // typing in a box: handled by that box
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const now = Date.now();
+  if (now - kbLast > 300) kbBuf = "";
+  kbLast = now;
+  clearTimeout(kbTimer);
+  if (e.key === "Enter" || e.key === "Tab") {
+    if (kbBuf && hwScan(kbBuf)) e.preventDefault();
+    kbBuf = "";
+    return;
+  }
+  if (/^[0-9xX]$/.test(e.key)) {
+    kbBuf += e.key.toUpperCase();
+    e.preventDefault();
+    // Scanners set to send no Enter: check once the typing stops
+    kbTimer = setTimeout(() => {
+      if ((kbBuf.length === 10 || kbBuf.length === 13) && hwScan(kbBuf)) kbBuf = "";
+    }, 250);
+  }
+});
+
 // ---------- Settings ----------
 function fillSettings() {
   $("keepaKey").value = S.keepaKey; $("fulfillment").value = S.fulfillment; $("loadOffers").value = S.loadOffers;
@@ -930,7 +991,18 @@ $("saveSettings").addEventListener("click", () => {
 $("toggleSettings").addEventListener("click", () => { $("settingsCard").hidden = !$("settingsCard").hidden; });
 $("scanBtn").addEventListener("click", () => (scanning ? stopScan() : startScan()));
 $("checkBtn").addEventListener("click", check);
-for (const id of ["isbn", "cost"]) $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
+$("isbn").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); ensureAudio(); hwFlag = true; check(); e.target.select(); }
+});
+$("isbn").addEventListener("focus", (e) => e.target.select());   // next scan replaces the old ISBN
+$("cost").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  e.preventDefault(); ensureAudio();
+  const sp = splitScan($("cost").value);
+  if (sp) { $("cost").value = sp.rest; $("isbn").value = sp.isbn; hwFlag = true; }
+  check();
+  e.target.blur();
+});
 $("clearHist").addEventListener("click", () => { HIST = []; save("isbnScoutHistory", HIST); renderHist(); });
 $("tabScan").addEventListener("click", () => showTab("scan"));
 $("tabRecent").addEventListener("click", () => showTab("recent"));

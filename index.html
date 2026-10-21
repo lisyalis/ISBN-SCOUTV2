@@ -357,16 +357,43 @@ function to13(raw) {
 }
 
 // ---------- Keepa ----------
-async function keepa(isbn13) {
-  const url = `https://api.keepa.com/product?key=${encodeURIComponent(S.keepaKey)}&domain=1&code=${isbn13}&stats=180&history=0${S.loadOffers === "1" ? "&offers=20&only-live-offers=1" : ""}`;
+async function keepaGet(params) {
+  const url = `https://api.keepa.com/product?key=${encodeURIComponent(S.keepaKey)}&domain=1&${params}`;
   let r;
   try { r = await fetch(url); } catch { throw new Error("Couldn't reach Keepa. Check your signal and try again."); }
   const data = await r.json().catch(() => ({}));
   if (r.status === 429) throw new Error("Out of Keepa tokens. Wait a few minutes.");
-  if (!r.ok || data.error) throw new Error((data.error && data.error.message) || `Keepa error ${r.status}. Check your API key in Settings.`);
-  const p = data.products && data.products[0];
-  if (!p || !p.asin) throw new Error("No Amazon listing found for this ISBN.");
-  return { p, tokensLeft: data.tokensLeft };
+  if (!r.ok || data.error) {
+    const err = new Error((data.error && data.error.message) || `Keepa error ${r.status}. Check your API key in Settings.`);
+    err.invalidParam = /invalid parameter/i.test(err.message);
+    throw err;
+  }
+  return data;
+}
+
+// Some Keepa accounts reject offers on an ISBN lookup. Then: ISBN -> ASIN first, offers by ASIN second.
+let offersByAsin = load("isbnScoutOffersByAsin", false);
+async function keepa(isbn13) {
+  const base = "stats=180&history=0", offers = "&offers=20&only-live-offers=1";
+  const pick = (d) => {
+    const p = d.products && d.products[0];
+    if (!p || !p.asin) throw new Error("No Amazon listing found for this ISBN.");
+    return p;
+  };
+  if (S.loadOffers !== "1") { const d = await keepaGet(`code=${isbn13}&${base}`); return { p: pick(d), tokensLeft: d.tokensLeft }; }
+  if (!offersByAsin) {
+    try { const d = await keepaGet(`code=${isbn13}&${base}${offers}`); return { p: pick(d), tokensLeft: d.tokensLeft }; }
+    catch (e) { if (!e.invalidParam) throw e; offersByAsin = true; save("isbnScoutOffersByAsin", true); }
+  }
+  const d1 = await keepaGet(`code=${isbn13}&${base}`);
+  const p1 = pick(d1);
+  try {
+    const d2 = await keepaGet(`asin=${p1.asin}&${base}${offers}`);
+    return { p: pick(d2), tokensLeft: d2.tokensLeft };
+  } catch (e) {
+    if (!e.invalidParam) throw e;
+    return { p: p1, tokensLeft: d1.tokensLeft };   // offers not allowed on this key: show without FBA column
+  }
 }
 
 const cents = (v) => (typeof v === "number" && v > 0 ? v / 100 : null);
